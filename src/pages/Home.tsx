@@ -1,90 +1,179 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 const API_BASE_URL = 'https://facebookvideo-downloader-backend.vercel.app';
+const API_META_DOWNLOAD = `${API_BASE_URL}/api/meta/download`;
 
-type ApiResponse = Record<string, unknown>;
+type ApiMediaItem = {
+  resolution?: string;
+  thumbnail?: string;
+  url?: string;
+  shouldRender?: boolean;
+};
 
-type MediaLink = {
-  url: string;
-  label: string;
-  kind: 'video' | 'audio' | 'unknown';
+type ApiMetaDownloadResponse = {
+  success?: boolean;
+  error?: string;
+  data?: {
+    developer?: string;
+    status?: boolean;
+    msg?: string;
+    data?: ApiMediaItem[];
+  };
 };
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
-const isMediaLikeUrl = (url: string): boolean =>
-  /(mp4|m3u8|webm|mov|avi|mp3|m4a|aac|download|video|playable|fbcdn)/i.test(url);
-
-const inferKind = (label: string, url: string): MediaLink['kind'] => {
-  const combined = `${label} ${url}`.toLowerCase();
-  if (/(mp3|m4a|aac|audio)/.test(combined)) return 'audio';
-  if (/(mp4|m3u8|webm|mov|video|playable|hd|sd)/.test(combined)) return 'video';
-  return 'unknown';
-};
-
-const collectLinks = (
-  value: unknown,
-  path: string,
-  acc: MediaLink[],
-  seen: Set<unknown>
-): void => {
-  if (typeof value === 'string') {
-    if (/^https?:\/\//i.test(value) && isMediaLikeUrl(value)) {
-      const kind = inferKind(path, value);
-      const label = path.split('.').pop() || 'video';
-      acc.push({ url: value, label, kind });
-    }
-    return;
-  }
-
-  if (!isObject(value) && !Array.isArray(value)) return;
-  if (seen.has(value)) return;
-  seen.add(value);
-
-  if (Array.isArray(value)) {
-    value.forEach((item, idx) => collectLinks(item, `${path}[${idx}]`, acc, seen));
-    return;
-  }
-
-  Object.entries(value).forEach(([key, nested]) => {
-    const nextPath = path ? `${path}.${key}` : key;
-    collectLinks(nested, nextPath, acc, seen);
-  });
-};
-
-const extractMediaLinks = (payload: ApiResponse): MediaLink[] => {
-  const collected: MediaLink[] = [];
-  collectLinks(payload, '', collected, new Set());
-
-  const unique = new Map<string, MediaLink>();
-  collected.forEach((link) => {
-    if (!unique.has(link.url)) unique.set(link.url, link);
-  });
-
-  return Array.from(unique.values());
-};
-
-const readApiResponse = async (response: Response): Promise<ApiResponse> => {
+const readApiResponse = async (response: Response): Promise<ApiMetaDownloadResponse> => {
   const parsed = (await response.json()) as unknown;
   if (!isObject(parsed)) {
     throw new Error('Unexpected API response format.');
   }
-  return parsed;
+  return parsed as ApiMetaDownloadResponse;
+};
+
+const normalizeUrl = (value?: string): string => {
+  if (!value) return '';
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith('/')) return `${API_BASE_URL}${value}`;
+  return `${API_BASE_URL}/${value}`;
+};
+
+const toPlayablePreviewUrl = (value?: string): string => {
+  const normalized = normalizeUrl(value);
+  if (!normalized) return '';
+  if (/\/render\.php/i.test(normalized)) return '';
+
+  try {
+    const parsed = new URL(normalized);
+    parsed.searchParams.delete('dl');
+    return parsed.toString();
+  } catch {
+    return normalized.replace(/([?&])dl=1(&|$)/, '$1').replace(/[?&]$/, '');
+  }
 };
 
 export default function Home() {
   const [url, setUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [apiData, setApiData] = useState<ApiResponse | null>(null);
-  const [mediaLinks, setMediaLinks] = useState<MediaLink[]>([]);
+  const [apiData, setApiData] = useState<ApiMetaDownloadResponse | null>(null);
+  const [mediaItems, setMediaItems] = useState<ApiMediaItem[]>([]);
+  const [selectedFormatIndex, setSelectedFormatIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [showOverlayControl, setShowOverlayControl] = useState(true);
   const [error, setError] = useState('');
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const resultRef = useRef<HTMLDivElement | null>(null);
+  const hideControlTimerRef = useRef<number | null>(null);
 
-  const previewLink = useMemo(
-    () => mediaLinks.find((item) => item.kind === 'video') ?? mediaLinks[0],
-    [mediaLinks]
-  );
+  const previewItem = useMemo(() => {
+    return (
+      mediaItems.find((item) => {
+        const mediaUrl = normalizeUrl(item.url);
+        return /(\.mp4|\.webm|m3u8|rapidcdn|fbcdn|video)/i.test(mediaUrl);
+      }) ?? mediaItems[0]
+    );
+  }, [mediaItems]);
+  const selectedItem = mediaItems[selectedFormatIndex] ?? previewItem;
+  const selectedUrl = normalizeUrl(selectedItem?.url);
+  const previewSource = useMemo(() => {
+    const selectedPlayable = toPlayablePreviewUrl(selectedItem?.url);
+    if (selectedPlayable) {
+      return {
+        url: selectedPlayable,
+        poster: normalizeUrl(selectedItem?.thumbnail),
+      };
+    }
+
+    for (const item of mediaItems) {
+      const playable = toPlayablePreviewUrl(item.url);
+      if (playable) {
+        return {
+          url: playable,
+          poster: normalizeUrl(item.thumbnail),
+        };
+      }
+    }
+
+    return { url: '', poster: '' };
+  }, [mediaItems, selectedItem]);
+
+  const clearHideControlTimer = () => {
+    if (hideControlTimerRef.current !== null) {
+      window.clearTimeout(hideControlTimerRef.current);
+      hideControlTimerRef.current = null;
+    }
+  };
+
+  const scheduleHideControl = () => {
+    clearHideControlTimer();
+    hideControlTimerRef.current = window.setTimeout(() => {
+      setShowOverlayControl(false);
+    }, 1000);
+  };
+
+  const handleVideoPlay = () => {
+    setIsPlaying(true);
+    setShowOverlayControl(true);
+    scheduleHideControl();
+  };
+
+  const handleVideoPause = () => {
+    setIsPlaying(false);
+    setShowOverlayControl(true);
+    clearHideControlTimer();
+  };
+
+  const handleCenterPlayPause = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    try {
+      if (video.paused) {
+        await video.play();
+      } else {
+        video.pause();
+      }
+    } catch {
+      setError('Video play failed in browser. Try direct download button.');
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      clearHideControlTimer();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mediaItems.length) {
+      setSelectedFormatIndex(0);
+      return;
+    }
+
+    const playableIndex = mediaItems.findIndex((item) => Boolean(toPlayablePreviewUrl(item.url)));
+    if (playableIndex >= 0) {
+      setSelectedFormatIndex(playableIndex);
+    } else {
+      const renderIndex = mediaItems.findIndex((item) => item.shouldRender);
+      setSelectedFormatIndex(renderIndex >= 0 ? renderIndex : 0);
+    }
+    setIsPlaying(false);
+    setShowOverlayControl(true);
+  }, [mediaItems]);
+
+  useEffect(() => {
+    if (mediaItems.length > 0) {
+      resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [mediaItems]);
+
+  const handleStartDownloadingClick = () => {
+    inputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    inputRef.current?.focus();
+  };
 
   const handleDownload = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,55 +182,28 @@ export default function Home() {
     setIsLoading(true);
     setError('');
     setApiData(null);
-    setMediaLinks([]);
+    setMediaItems([]);
 
     try {
-      const requests: Array<() => Promise<Response>> = [
-        () =>
-          fetch(`${API_BASE_URL}/api/meta`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url }),
-          }),
-        () => fetch(`${API_BASE_URL}/api/meta?url=${encodeURIComponent(url)}`),
-      ];
-
-      let payload: ApiResponse | null = null;
-      let lastError = 'Failed to fetch video data.';
-
-      for (const request of requests) {
-        try {
-          const response = await request();
-          payload = await readApiResponse(response);
-
-          if (response.ok) {
-            break;
-          }
-
-          if (typeof payload.error === 'string') {
-            lastError = payload.error;
-          } else {
-            lastError = `Request failed with status ${response.status}.`;
-          }
-        } catch {
-          lastError = 'Network error while contacting downloader API.';
-        }
-      }
-
-      if (!payload) {
-        throw new Error(lastError);
-      }
-
-      const extractedLinks = extractMediaLinks(payload);
-
-      if (payload.success === false && extractedLinks.length === 0) {
-        throw new Error(
-          typeof payload.error === 'string' ? payload.error : 'No downloadable media found.'
-        );
-      }
-
+      const response = await fetch(`${API_META_DOWNLOAD}?url=${encodeURIComponent(url)}`);
+      const payload = await readApiResponse(response);
       setApiData(payload);
-      setMediaLinks(extractedLinks);
+
+      if (!response.ok || payload.success === false) {
+        throw new Error(payload.error || `Request failed with status ${response.status}.`);
+      }
+
+      if (!payload.data?.status) {
+        throw new Error(payload.data?.msg || 'Backend could not process this Facebook link.');
+      }
+
+      const items = (payload.data.data || []).filter((item) => Boolean(item.url));
+
+      if (!items.length) {
+        throw new Error('No downloadable formats found for this link.');
+      }
+
+      setMediaItems(items);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Something went wrong.');
     } finally {
@@ -168,10 +230,14 @@ export default function Home() {
                 Download Facebook videos, reels, and stories in high-quality format with our free online Facebook video downloader. No watermarks, no registration required.
               </p>
               <div className="d-flex gap-3 flex-wrap fade-in">
-                <a href="#download" className="btn btn-primary btn-lg">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-lg"
+                  onClick={handleStartDownloadingClick}
+                >
                   <i className="fas fa-download"></i>
                   Start Downloading
-                </a>
+                </button>
                 <Link to="/guide" className="btn btn-glass btn-lg">
                   <i className="fas fa-play-circle"></i>
                   How It Works
@@ -201,6 +267,7 @@ export default function Home() {
                 <form onSubmit={handleDownload}>
                   <div className="download-input-group">
                     <input
+                      ref={inputRef}
                       type="url"
                       className="form-control download-input"
                       placeholder="https://facebook.com/video..."
@@ -237,7 +304,7 @@ export default function Home() {
         </div>
       </section>
 
-      {(error || apiData || mediaLinks.length > 0) && (
+      {(error || apiData || mediaItems.length > 0) && (
         <section className="section-padding bg-light-custom">
           <div className="container">
             <div className="row justify-content-center">
@@ -248,32 +315,70 @@ export default function Home() {
                   </div>
                 )}
 
-                {previewLink && (
-                  <div className="content-card mb-4">
+                {selectedItem && (
+                  <div className="content-card mb-4" ref={resultRef}>
                     <h4 className="mb-3">Video Preview</h4>
-                    <video controls className="w-100 rounded" src={previewLink.url}>
-                      Your browser does not support the video tag.
-                    </video>
-                  </div>
-                )}
+                    <div className="video-preview-shell">
+                      <video
+                        ref={videoRef}
+                        key={previewSource.url}
+                        controls
+                        className="w-100 rounded preview-video-fixed-height"
+                        src={previewSource.url}
+                        poster={previewSource.poster}
+                        onPlay={handleVideoPlay}
+                        onPause={handleVideoPause}
+                        onEnded={handleVideoPause}
+                      >
+                        Your browser does not support the video tag.
+                      </video>
 
-                {mediaLinks.length > 0 && (
-                  <div className="content-card mb-4">
-                    <h4 className="mb-3">Download Options</h4>
-                    <div className="d-grid gap-2">
-                      {mediaLinks.map((item, index) => (
-                        <a
-                          key={`${item.url}-${index}`}
-                          href={item.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          download
-                          className="btn btn-primary"
+                      {showOverlayControl && (
+                        <button
+                          type="button"
+                          className="video-center-play-btn"
+                          onClick={handleCenterPlayPause}
+                          aria-label={isPlaying ? 'Pause video' : 'Play video'}
                         >
-                          Download {item.kind !== 'unknown' ? item.kind : 'file'} ({item.label})
-                        </a>
-                      ))}
+                          <i className={`fas ${isPlaying ? 'fa-pause' : 'fa-play'}`}></i>
+                        </button>
+                      )}
                     </div>
+
+                    <a
+                      href={selectedUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      download
+                      className="btn btn-primary w-100 mt-3"
+                    >
+                      Download Selected Format ({selectedItem.resolution || 'Best Quality'})
+                    </a>
+
+                    {mediaItems.length > 0 && (
+                      <div className="mt-3">
+                        <p className="small text-muted mb-2">Quick Download (All Formats)</p>
+                        <div className="compact-format-buttons">
+                          {mediaItems.map((item, index) => (
+                            <a
+                              key={`${item.url}-compact-${index}`}
+                              href={normalizeUrl(item.url)}
+                              target="_blank"
+                              rel="noreferrer"
+                              download
+                              className="btn btn-primary compact-format-btn"
+                              onClick={() => {
+                                setSelectedFormatIndex(index);
+                                setIsPlaying(false);
+                                setShowOverlayControl(true);
+                              }}
+                            >
+                              {item.resolution || `Format ${index + 1}`}
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

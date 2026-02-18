@@ -147,6 +147,7 @@ a:hover {
   height: 100%;
   background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
   transition: left 0.6s ease;
+  pointer-events: none;
 }
 
 .btn:hover::before {
@@ -285,6 +286,7 @@ a:hover {
   position: relative;
   overflow: hidden;
   padding: 120px 0 80px;
+  isolation: isolate;
 }
 
 .hero-bg-pattern {
@@ -298,6 +300,7 @@ a:hover {
     radial-gradient(circle at 80% 80%, rgba(66, 183, 42, 0.1) 0%, transparent 50%),
     radial-gradient(circle at 40% 20%, rgba(24, 119, 242, 0.08) 0%, transparent 40%);
   animation: heroPulse 10s ease-in-out infinite;
+  pointer-events: none;
 }
 
 @keyframes heroPulse {
@@ -307,7 +310,7 @@ a:hover {
 
 .hero-content {
   position: relative;
-  z-index: 2;
+  z-index: 10;
 }
 
 .hero-badge {
@@ -359,6 +362,7 @@ a:hover {
   padding: 3rem;
   border: 1px solid rgba(255,255,255,0.1);
   position: relative;
+  z-index: 11;
 }
 
 .download-box-wrapper::before {
@@ -373,6 +377,7 @@ a:hover {
   -webkit-mask-composite: xor;
   mask-composite: exclude;
   opacity: 0.5;
+  pointer-events: none;
 }
 
 .download-input-group {
@@ -872,6 +877,7 @@ a:hover {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  width: fit-content;
 }
 
 .social-icon {
@@ -1087,6 +1093,53 @@ a:hover {
   to { transform: rotate(360deg); }
 }
 
+/* Video Result Player */
+.video-preview-shell {
+  position: relative;
+}
+
+.preview-video-fixed-height {
+  width: 100%;
+  height: 380px;
+  object-fit: cover;
+  background: #000;
+}
+
+.video-center-play-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 68px;
+  height: 68px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  z-index: 3;
+}
+
+.video-center-play-btn:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.compact-format-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.compact-format-btn {
+  padding: 8px 14px;
+  font-size: 0.8rem;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 /* ============================================
    Utility Classes
    ============================================ */
@@ -1153,6 +1206,19 @@ a:hover {
   .btn-lg {
     padding: 16px 32px;
     width: 100%;
+  }
+
+  .preview-video-fixed-height {
+    height: 240px;
+  }
+
+  .video-center-play-btn {
+    display: none;
+  }
+
+  .compact-format-btn {
+    font-size: 0.75rem;
+    padding: 7px 12px;
   }
 }
 
